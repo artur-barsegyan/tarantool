@@ -35,6 +35,7 @@
 #include "box/fk_constraint.h"
 #include "box/key_def.h"
 #include "box/sql.h"
+#include "box/constraint_id.h"
 
 /**
  * This file contains auxiliary structures and functions which
@@ -154,6 +155,7 @@ enum sql_index_type {
 
 enum entity_type {
 	ENTITY_TYPE_TABLE = 0,
+	ENTITY_TYPE_COLUMN,
 	ENTITY_TYPE_VIEW,
 	ENTITY_TYPE_INDEX,
 	ENTITY_TYPE_TRIGGER,
@@ -205,6 +207,14 @@ struct create_entity_def {
 struct create_table_def {
 	struct create_entity_def base;
 	struct space *new_space;
+};
+
+struct create_column_def {
+	struct create_entity_def base;
+	/** Shallow space_def copy. */
+	struct space *space;
+	/** Column type. */
+	struct type_def *type_def;
 };
 
 struct create_view_def {
@@ -462,6 +472,16 @@ create_table_def_init(struct create_table_def *table_def, struct Token *name,
 {
 	create_entity_def_init(&table_def->base, ENTITY_TYPE_TABLE, NULL, name,
 			       if_not_exists);
+}
+
+static inline void
+create_column_def_init(struct create_column_def *column_def,
+		       struct SrcList *table_name, struct Token *name,
+		       struct type_def *type_def)
+{
+	create_entity_def_init(&column_def->base, ENTITY_TYPE_COLUMN,
+			       table_name, name, false);
+	column_def->type_def = type_def;
 }
 
 static inline void
