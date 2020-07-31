@@ -205,26 +205,6 @@ struct create_entity_def {
 struct create_table_def {
 	struct create_entity_def base;
 	struct space *new_space;
-	/**
-	 * Number of FK constraints declared within
-	 * CREATE TABLE statement.
-	 */
-	uint32_t fkey_count;
-	/**
-	 * Foreign key constraint appeared in CREATE TABLE stmt.
-	 */
-	struct rlist new_fkey;
-	/**
-	 * Number of CK constraints declared within
-	 * CREATE TABLE statement.
-	 */
-	uint32_t check_count;
-	/** Check constraint appeared in CREATE TABLE stmt. */
-	struct rlist new_check;
-	/** True, if table to be created has AUTOINCREMENT PK. */
-	bool has_autoinc;
-	/** Id of field with AUTOINCREMENT. */
-	uint32_t autoinc_fieldno;
 };
 
 struct create_view_def {
@@ -482,9 +462,6 @@ create_table_def_init(struct create_table_def *table_def, struct Token *name,
 {
 	create_entity_def_init(&table_def->base, ENTITY_TYPE_TABLE, NULL, name,
 			       if_not_exists);
-	rlist_create(&table_def->new_fkey);
-	rlist_create(&table_def->new_check);
-	table_def->autoinc_fieldno = 0;
 }
 
 static inline void
@@ -497,16 +474,6 @@ create_view_def_init(struct create_view_def *view_def, struct Token *name,
 	view_def->create_start = create;
 	view_def->select = select;
 	view_def->aliases = aliases;
-}
-
-static inline void
-create_table_def_destroy(struct create_table_def *table_def)
-{
-	if (table_def->new_space == NULL)
-		return;
-	struct fk_constraint_parse *fk;
-	rlist_foreach_entry(fk, &table_def->new_fkey, link)
-		sql_expr_list_delete(sql_get(), fk->selfref_cols);
 }
 
 #endif /* TARANTOOL_BOX_SQL_PARSE_DEF_H_INCLUDED */
