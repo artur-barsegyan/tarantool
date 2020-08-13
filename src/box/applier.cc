@@ -799,6 +799,29 @@ applier_txn_wal_write_cb(struct trigger *trigger, void *event)
 	return 0;
 }
 
+/*
+ * In a full mesh topology, the same set of changes
+ * may arrive via two concurrently running appliers.
+ * Hence we need a latch to strictly order all changes
+ * that belong to the same server id.
+ */
+static inline struct latch *
+applier_lock(uint32_t replica_id)
+{
+	struct replica *replica = replica_by_id(replica_id);
+	struct latch *latch = (replica ? &replica->order_latch :
+			       &replicaset.applier.order_latch);
+	latch_lock(latch);
+	return latch;
+}
+
+static inline void
+applier_unlock(struct latch *latch)
+{
+	assert(latch != NULL);
+	latch_unlock(latch);
+}
+
 /**
  * Apply all rows in the rows queue as a single transaction.
  *
@@ -811,19 +834,11 @@ applier_apply_tx(struct stailq *rows)
 					struct applier_tx_row, next)->row;
 	struct xrow_header *last_row;
 	last_row = &stailq_last_entry(rows, struct applier_tx_row, next)->row;
-	struct replica *replica = replica_by_id(first_row->replica_id);
-	/*
-	 * In a full mesh topology, the same set of changes
-	 * may arrive via two concurrently running appliers.
-	 * Hence we need a latch to strictly order all changes
-	 * that belong to the same server id.
-	 */
-	struct latch *latch = (replica ? &replica->order_latch :
-			       &replicaset.applier.order_latch);
-	latch_lock(latch);
+	struct latch *latch = applier_lock(first_row->replica_id);
+
 	if (vclock_get(&replicaset.applier.vclock,
 		       last_row->replica_id) >= last_row->lsn) {
-		latch_unlock(latch);
+		applier_unlock(latch);
 		return 0;
 	} else if (vclock_get(&replicaset.applier.vclock,
 			      first_row->replica_id) >= first_row->lsn) {
@@ -855,7 +870,7 @@ applier_apply_tx(struct stailq *rows)
 	struct txn *txn = txn_begin();
 	struct applier_tx_row *item;
 	if (txn == NULL) {
-		latch_unlock(latch);
+		applier_unlock(latch);
 		return -1;
 	}
 	stailq_foreach_entry(item, rows, next) {
@@ -930,12 +945,12 @@ applier_apply_tx(struct stailq *rows)
 	 */
 	vclock_follow(&replicaset.applier.vclock, last_row->replica_id,
 		      last_row->lsn);
-	latch_unlock(latch);
+	applier_unlock(latch);
 	return 0;
 rollback:
 	txn_rollback(txn);
 fail:
-	latch_unlock(latch);
+	applier_unlock(latch);
 	fiber_gc();
 	return -1;
 }
