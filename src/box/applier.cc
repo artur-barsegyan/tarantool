@@ -270,45 +270,17 @@ process_nop(struct request *request)
 	return txn_commit_stmt(txn, request);
 }
 
-/*
- * CONFIRM/ROLLBACK rows aren't dml requests  and require special
- * handling: instead of performing some operations on spaces,
- * processing these requests requires txn_limbo to either confirm
- * or rollback some of its entries.
- */
-static int
-process_synchro_row(struct request *request)
-{
-	assert(iproto_type_is_synchro_request(request->header->type));
-	struct txn *txn = in_txn();
-
-	struct synchro_request syn_req;
-	if (xrow_decode_synchro(request->header, &syn_req) != 0)
-		return -1;
-	assert(txn->n_applier_rows == 0);
-	/*
-	 * This is not really a transaction. It just uses txn API
-	 * to put the data into WAL. And obviously it should not
-	 * go to the limbo and block on the very same sync
-	 * transaction which it tries to confirm now.
-	 */
-	txn_set_flag(txn, TXN_FORCE_ASYNC);
-
-	if (txn_begin_stmt(txn, NULL) != 0)
-		return -1;
-	if (txn_commit_stmt(txn, request) != 0)
-		return -1;
-	return txn_limbo_process(&txn_limbo, &syn_req);
-}
-
 static int
 apply_row(struct xrow_header *row)
 {
 	struct request request;
-	if (iproto_type_is_synchro_request(row->type)) {
-		request.header = row;
-		return process_synchro_row(&request);
-	}
+
+	/*
+	 * Synchro requests must never use txn engine,
+	 * instead they are handled separately.
+	 */
+	assert(!iproto_type_is_synchro_request(row->type));
+
 	if (xrow_decode_dml(row, &request, dml_request_key_map(row->type)) != 0)
 		return -1;
 	if (request.type == IPROTO_NOP)
