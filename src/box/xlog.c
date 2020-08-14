@@ -511,13 +511,15 @@ xdir_open_cursor(struct xdir *dir, int64_t signature,
  * @return nothing.
  */
 int
-xdir_scan(struct xdir *dir)
+xdir_scan(struct xdir *dir, bool is_dir_required)
 {
 	DIR *dh = opendir(dir->dirname);        /* log dir */
 	int64_t *signatures = NULL;             /* log file names */
 	size_t s_count = 0, s_capacity = 0;
 
 	if (dh == NULL) {
+		if (!is_dir_required && errno == ENOENT)
+			return 0;
 		diag_set(SystemError, "error reading directory '%s'",
 			  dir->dirname);
 		return -1;

@@ -187,7 +187,7 @@ xdir_destroy(struct xdir *dir);
  * snapshot or scan through all logs.
  */
 int
-xdir_scan(struct xdir *dir);
+xdir_scan(struct xdir *dir, bool is_dir_required);
 
 /**
  * Check that a directory exists and is writable.
@@ -821,9 +821,9 @@ xdir_open_cursor(struct xdir *dir, int64_t signature,
 #include "exception.h"
 
 static inline void
-xdir_scan_xc(struct xdir *dir)
+xdir_scan_xc(struct xdir *dir, bool is_dir_required)
 {
-	if (xdir_scan(dir) == -1)
+	if (xdir_scan(dir, is_dir_required) == -1)
 		diag_raise();
 }
 
