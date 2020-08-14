@@ -648,6 +648,26 @@ struct applier_tx_row {
 	struct xrow_header row;
 };
 
+/**
+ * Get first xrow from a list.
+ */
+static inline struct xrow_header *
+applier_first_row(struct stailq *rows)
+{
+	return &stailq_first_entry(rows,
+		struct applier_tx_row, next)->row;
+}
+
+/**
+ * Get last xrow from a list.
+ */
+static inline struct xrow_header *
+applier_last_row(struct stailq *rows)
+{
+	return &stailq_last_entry(rows,
+		struct applier_tx_row, next)->row;
+}
+
 static struct applier_tx_row *
 applier_read_tx_row(struct applier *applier)
 {
@@ -749,8 +769,7 @@ applier_read_tx(struct applier *applier, struct stailq *rows)
 		}
 		stailq_add_tail(rows, &tx_row->next);
 
-	} while (!stailq_last_entry(rows, struct applier_tx_row,
-				    next)->row.is_commit);
+	} while (!applier_last_row(rows)->is_commit);
 }
 
 static int
@@ -830,10 +849,8 @@ applier_unlock(struct latch *latch)
 static int
 applier_apply_tx(struct stailq *rows)
 {
-	struct xrow_header *first_row = &stailq_first_entry(rows,
-					struct applier_tx_row, next)->row;
-	struct xrow_header *last_row;
-	last_row = &stailq_last_entry(rows, struct applier_tx_row, next)->row;
+	struct xrow_header *first_row = applier_first_row(rows);
+	struct xrow_header *last_row = applier_last_row(rows);
 	struct latch *latch = applier_lock(first_row->replica_id);
 
 	if (vclock_get(&replicaset.applier.vclock,
@@ -849,9 +866,7 @@ applier_apply_tx(struct stailq *rows)
 		 */
 		struct xrow_header *tmp;
 		while (true) {
-			tmp = &stailq_first_entry(rows,
-						  struct applier_tx_row,
-						  next)->row;
+			tmp = applier_first_row(rows);
 			if (tmp->lsn <= vclock_get(&replicaset.applier.vclock,
 						   tmp->replica_id)) {
 				stailq_shift(rows);
@@ -1133,12 +1148,12 @@ applier_subscribe(struct applier *applier)
 		applier_read_tx(applier, &rows);
 
 		applier->last_row_time = ev_monotonic_now(loop());
+
 		/*
 		 * In case of an heartbeat message wake a writer up
 		 * and check applier state.
 		 */
-		if (stailq_first_entry(&rows, struct applier_tx_row,
-				       next)->row.lsn == 0)
+		if (applier_first_row(&rows)->lsn == 0)
 			applier_signal_ack(applier);
 		else if (applier_apply_tx(&rows) != 0)
 			diag_raise();
