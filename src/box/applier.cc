@@ -774,6 +774,31 @@ applier_read_tx(struct applier *applier, struct stailq *rows)
 	} while (!applier_last_row(rows)->is_commit);
 }
 
+static void
+applier_rollback_by_wal_io(void)
+{
+	/*
+	 * Setup shared applier diagnostic area.
+	 *
+	 * FIXME: We should consider redesign this
+	 * moment and instead of carrying one shared
+	 * diag use per-applier diag instead all the time
+	 * (which actually already present in the structure).
+	 *
+	 * But remember that WAL writes are asynchronous and
+	 * rollback may happen a way later after it was passed to
+	 * the journal engine.
+	 */
+	diag_set(ClientError, ER_WAL_IO);
+	diag_set_error(&replicaset.applier.diag,
+		       diag_last_error(diag_get()));
+
+	/* Broadcast the rollback across all appliers. */
+	trigger_run(&replicaset.applier.on_rollback, NULL);
+	/* Rollback applier vclock to the committed one. */
+	vclock_copy(&replicaset.applier.vclock, &replicaset.vclock);
+}
+
 static int
 applier_txn_rollback_cb(struct trigger *trigger, void *event)
 {
@@ -784,30 +809,8 @@ applier_txn_rollback_cb(struct trigger *trigger, void *event)
 	 * ROLLBACK entry is a normal event and requires no
 	 * special handling.
 	 */
-	if (txn->signature == TXN_SIGNATURE_SYNC_ROLLBACK)
-		return 0;
-
-	/*
-	 * Setup shared applier diagnostic area.
-	 *
-	 * FIXME: We should consider redesign this
-	 * moment and instead of carrying one shared
-	 * diag use per-applier diag instead all the time
-	 * (which actually already present in the structure).
-	 *
-	 * But remember that transactions are asynchronous
-	 * and rollback may happen a way latter after it
-	 * passed to the journal engine.
-	 */
-	diag_set(ClientError, ER_WAL_IO);
-	diag_set_error(&replicaset.applier.diag,
-		       diag_last_error(diag_get()));
-
-	/* Broadcast the rollback event across all appliers. */
-	trigger_run(&replicaset.applier.on_rollback, event);
-
-	/* Rollback applier vclock to the committed one. */
-	vclock_copy(&replicaset.applier.vclock, &replicaset.vclock);
+	if (txn->signature != TXN_SIGNATURE_SYNC_ROLLBACK)
+		applier_rollback_by_wal_io();
 	return 0;
 }
 
@@ -844,9 +847,6 @@ applier_unlock(struct latch *latch)
 }
 
 struct synchro_entry {
-	/** An applier initiated the syncho request. */
-	struct applier *applier;
-
 	/** Encoded form of a synchro record. */
 	struct synchro_body_bin	body_bin;
 
@@ -876,25 +876,10 @@ apply_synchro_row_cb(struct journal_entry *entry)
 	assert(entry->complete_data != NULL);
 	struct synchro_entry *synchro_entry =
 		(struct synchro_entry *)entry->complete_data;
-	struct applier *applier = synchro_entry->applier;
-
-	/*
-	 * We can reuse triggers, they are allocated when
-	 * applier get subscribed and since packets handling
-	 * is processed after the subscribtion phase the triggers
-	 * will be alive.
-	 */
-	if (entry->res < 0) {
-		trigger_run(&replicaset.applier.on_rollback, applier);
-		/*
-		 * Restore the last written vlock value.
-		 */
-		vclock_copy(&replicaset.applier.vclock, &replicaset.vclock);
-		diag_set(ClientError, ER_WAL_IO);
-		diag_log();
-	} else {
-		trigger_run(&replicaset.applier.on_wal_write, applier);
-	}
+	if (entry->res < 0)
+		applier_rollback_by_wal_io();
+	else
+		trigger_run(&replicaset.applier.on_wal_write, NULL);
 
 	synchro_entry_delete(synchro_entry);
 }
@@ -904,8 +889,7 @@ apply_synchro_row_cb(struct journal_entry *entry)
  * the journal engine in async write way.
  */
 static struct synchro_entry *
-synchro_entry_new(struct applier *applier,
-		  struct xrow_header *applier_row,
+synchro_entry_new(struct xrow_header *applier_row,
 		  struct synchro_request *req)
 {
 	struct synchro_entry *entry;
@@ -926,7 +910,6 @@ synchro_entry_new(struct applier *applier,
 	struct synchro_body_bin *body_bin = &entry->body_bin;
 	struct xrow_header *row = &entry->row;
 
-	entry->applier = applier;
 	journal_entry->rows[0] = row;
 
 	xrow_encode_synchro(row, body_bin, req);
@@ -939,52 +922,31 @@ synchro_entry_new(struct applier *applier,
 	return entry;
 }
 
-/*
- * Process a synchro request from incoming applier packet
- * without using txn engine, for a speed sake.
- */
+/** Process a synchro request. */
 static int
-apply_synchro_row(struct applier *applier, struct xrow_header *row)
+apply_synchro_row(struct xrow_header *row)
 {
 	assert(iproto_type_is_synchro_request(row->type));
 
-	struct latch *latch = applier_lock(row->replica_id);
-	if (vclock_get(&replicaset.applier.vclock,
-		       row->replica_id) >= row->lsn) {
-		applier_unlock(latch);
-		return 0;
-	}
-
 	struct synchro_request req;
 	if (xrow_decode_synchro(row, &req) != 0)
-		goto out;
+		goto err;
 
 	if (txn_limbo_process(&txn_limbo, &req))
-		goto out;
+		goto err;
 
 	struct synchro_entry *entry;
-	entry = synchro_entry_new(applier, row, &req);
+	entry = synchro_entry_new(row, &req);
 	if (entry == NULL)
-		goto out;
+		goto err;
 
 	if (journal_write_async(&entry->journal_entry) != 0) {
 		diag_set(ClientError, ER_WAL_IO);
-		goto out;
+		goto err;
 	}
-
-	/*
-	 * In case if something get wrong the journal completion
-	 * handler will set the applier's vclock back to last
-	 * successfully WAL written value.
-	 */
-	vclock_follow(&replicaset.applier.vclock,
-		      row->replica_id, row->lsn);
-	applier_unlock(latch);
 	return 0;
-
-out:
+err:
 	diag_log();
-	applier_unlock(latch);
 	return -1;
 }
 
@@ -1023,13 +985,26 @@ applier_apply_tx(struct stailq *rows)
 		}
 	}
 
+	if (unlikely(iproto_type_is_synchro_request(first_row->type))) {
+		/*
+		 * Synchro messages are not transactions, in terms
+		 * of DML. Always sent and written isolated from
+		 * each other.
+		 */
+		assert(first_row == last_row);
+		if (apply_synchro_row(first_row) != 0)
+			diag_raise();
+		goto success;
+	}
+
 	/**
 	 * Explicitly begin the transaction so that we can
 	 * control fiber->gc life cycle and, in case of apply
 	 * conflict safely access failed xrow object and allocate
 	 * IPROTO_NOP on gc.
 	 */
-	struct txn *txn = txn_begin();
+	struct txn *txn;
+	txn = txn_begin();
 	struct applier_tx_row *item;
 	if (txn == NULL) {
 		applier_unlock(latch);
@@ -1098,6 +1073,7 @@ applier_apply_tx(struct stailq *rows)
 	if (txn_commit_async(txn) < 0)
 		goto fail;
 
+success:
 	/*
 	 * The transaction was sent to journal so promote vclock.
 	 *
@@ -1301,27 +1277,15 @@ applier_subscribe(struct applier *applier)
 		applier_read_tx(applier, &rows);
 
 		applier->last_row_time = ev_monotonic_now(loop());
-		struct xrow_header *row = applier_first_row(&rows);
 
-		if (row->lsn == 0) {
-			/*
-			 * In case of an heartbeat message
-			 * wake a writer up and check
-			 * the applier state.
-			 */
+		/*
+		 * In case of an heartbeat message wake a writer up
+		 * and check applier state.
+		 */
+		if (applier_first_row(&rows)->lsn == 0)
 			applier_signal_ack(applier);
-		} else if (iproto_type_is_synchro_request(row->type)) {
-			/*
-			 * Make sure synchro messages are never reached
-			 * in a batch (this is by design for simplicity
-			 * sake).
-			 */
-			assert(stailq_first(&rows) == stailq_last(&rows));
-			if (apply_synchro_row(applier, row) != 0)
-				diag_raise();
-		} else if (applier_apply_tx(&rows) != 0) {
+		else if (applier_apply_tx(&rows) != 0)
 			diag_raise();
-		}
 
 		if (ibuf_used(ibuf) == 0)
 			ibuf_reset(ibuf);
