@@ -2846,3 +2846,52 @@ box.execute([[SELECT 1 - '2';]])
 - null
 - 'Type mismatch: can not convert 2 to numeric'
 ...
+--
+-- Make sure there is no implicit string-to-number conversion in bitwise
+-- operations.
+--
+box.execute([[SELECT '1' | 2;]])
+---
+- null
+- 'Type mismatch: can not convert 1 to integer'
+...
+box.execute([[SELECT '1' & 2;]])
+---
+- null
+- 'Type mismatch: can not convert 1 to integer'
+...
+box.execute([[SELECT '1' << 2;]])
+---
+- null
+- 'Type mismatch: can not convert 1 to integer'
+...
+box.execute([[SELECT '1' >> 2;]])
+---
+- null
+- 'Type mismatch: can not convert 1 to integer'
+...
+box.execute([[SELECT ~'1';]])
+---
+- null
+- 'Type mismatch: can not convert 1 to integer'
+...
+box.execute([[SELECT 1 | '2';]])
+---
+- null
+- 'Type mismatch: can not convert 2 to integer'
+...
+box.execute([[SELECT 1 & '2';]])
+---
+- null
+- 'Type mismatch: can not convert 2 to integer'
+...
+box.execute([[SELECT 1 << '2';]])
+---
+- null
+- 'Type mismatch: can not convert 2 to integer'
+...
+box.execute([[SELECT 1 >> '2';]])
+---
+- null
+- 'Type mismatch: can not convert 2 to integer'
+...
